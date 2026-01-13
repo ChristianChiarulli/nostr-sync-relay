@@ -6,7 +6,7 @@ import {
   handleDisconnect,
 } from "./handlers";
 
-const PORT = parseInt(process.env.PORT ?? "4000", 10);
+const PORT = parseInt(process.env.PORT ?? "3000", 10);
 const DB_PATH = process.env.DB_PATH ?? "relay.db";
 
 // Initialize database
