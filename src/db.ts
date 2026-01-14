@@ -157,80 +157,8 @@ export function storeEvent(
     }
   }
 
-  // Handle syncable events (40000-49999): store all revisions for history
-  // Only discard conflicting revisions at the same generation if they are not referenced as parents
-  if (isSyncableKind(event.kind)) {
-    const dValue = getDTagValue(event);
-    const newRevisionId = getITagValue(event);
-
-    if (newRevisionId) {
-      const newParsed = parseRevisionId(newRevisionId);
-
-      // Find all existing revisions for this document
-      const existingRevisions = database
-        .query(
-          `SELECT e.id, e.tags FROM events e
-           JOIN event_tags t ON e.id = t.event_id
-           WHERE e.pubkey = ? AND e.kind = ? AND t.tag_name = 'd' AND t.tag_value = ?`
-        )
-        .all(event.pubkey, event.kind, dValue ?? "") as Array<{
-        id: string;
-        tags: string;
-      }>;
-
-      // Build set of revision IDs that are referenced as parents (v tags)
-      const referencedRevisions = new Set<string>();
-      for (const existing of existingRevisions) {
-        const existingTags = JSON.parse(existing.tags) as string[][];
-        for (const tag of existingTags) {
-          if (tag[0] === "v" && tag[1]) {
-            referencedRevisions.add(tag[1]);
-          }
-        }
-      }
-      // Also check v tags in the new event
-      for (const tag of event.tags) {
-        if (tag[0] === "v" && tag[1]) {
-          referencedRevisions.add(tag[1]);
-        }
-      }
-
-      for (const existing of existingRevisions) {
-        const existingTags = JSON.parse(existing.tags) as string[][];
-        const existingRevisionId = existingTags.find((t) => t[0] === "i")?.[1];
-
-        if (existingRevisionId) {
-          const existingParsed = parseRevisionId(existingRevisionId);
-
-          // Only compare revisions at the same generation
-          if (existingParsed.generation === newParsed.generation) {
-            // If existing revision is referenced as a parent, keep it
-            if (referencedRevisions.has(existingRevisionId)) {
-              // Reject new revision - can't replace a revision that's part of the chain
-              return {
-                success: true,
-                message:
-                  "duplicate: existing revision at this generation is referenced as parent",
-              };
-            }
-
-            // At same generation, higher hash wins
-            if (existingParsed.hash > newParsed.hash) {
-              // Existing wins, reject new
-              return {
-                success: true,
-                message:
-                  "duplicate: have a winning version at this generation",
-              };
-            } else if (existingParsed.hash < newParsed.hash) {
-              // New wins, delete existing (unless it's referenced)
-              deleteEvent(existing.id);
-            }
-          }
-        }
-      }
-    }
-  }
+  // Syncable events (40000-49999): store all revisions for history (per NIP spec)
+  // Clients handle conflict resolution
 
   // Regular events: store all
 
