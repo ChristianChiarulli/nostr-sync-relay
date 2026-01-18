@@ -25,12 +25,13 @@ const server = Bun.serve<ClientState>({
       return new Response(
         JSON.stringify({
           name: "NIP-DB Relay",
-          description: "A Nostr relay with support for NIP-01 and NIP-DB (syncable events)",
+          description: "A Nostr relay with support for NIP-01 and NIP-DB (syncable events with changes feed)",
           pubkey: "",
           contact: "",
           supported_nips: [1],
           software: "nip-db-relay",
-          version: "0.1.0",
+          version: "0.3.0",
+          supported_messages: ["EVENT", "REQ", "CLOSE", "CHANGES", "LASTSEQ", "CHANGES_SUB", "CHANGES_UNSUB"],
         }),
         {
           headers: {
@@ -45,6 +46,7 @@ const server = Bun.serve<ClientState>({
     const upgraded = server.upgrade(req, {
       data: {
         subscriptions: new Map(),
+        changesSubscriptions: new Map(),
       },
     });
 

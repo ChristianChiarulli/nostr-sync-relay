@@ -132,7 +132,8 @@ export function validateFilter(
   // Validate tag filters (single-letter only per NIP-01)
   for (const [key, value] of Object.entries(f)) {
     if (key.startsWith("#")) {
-      if (key.length !== 2 || !/^[a-zA-Z]$/.test(key[1])) {
+      const tagLetter = key[1];
+      if (key.length !== 2 || !tagLetter || !/^[a-zA-Z]$/.test(tagLetter)) {
         return {
           valid: false,
           error: "tag filters must be single letters (a-z, A-Z)",

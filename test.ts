@@ -99,7 +99,8 @@ async function main() {
     await new Promise((r) => setTimeout(r, 500));
 
     console.log("\nPublishing second revision of syncable event...");
-    const prevRev = event2.tags.find((t) => t[0] === "i")![1];
+    const prevRevTag = event2.tags.find((t) => t[0] === "i");
+    const prevRev = prevRevTag?.[1] ?? "";
     const contentHash = bytesToHex(sha256(new TextEncoder().encode("Second revision")));
     const combinedHash = sha256(new TextEncoder().encode(prevRev + ":" + contentHash));
     const event3 = await createEvent(40001, "Second revision", [

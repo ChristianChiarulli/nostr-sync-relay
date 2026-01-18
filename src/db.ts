@@ -13,10 +13,11 @@ export function initDatabase(path: string = "relay.db"): Database {
   db = new Database(path);
   db.exec("PRAGMA journal_mode = WAL");
 
-  // Create events table
+  // Create events table with seq for changes feed
   db.exec(`
     CREATE TABLE IF NOT EXISTS events (
-      id TEXT PRIMARY KEY,
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT UNIQUE NOT NULL,
       pubkey TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       kind INTEGER NOT NULL,
@@ -28,11 +29,13 @@ export function initDatabase(path: string = "relay.db"): Database {
 
   // Create indexes for efficient querying
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_id ON events(id);
     CREATE INDEX IF NOT EXISTS idx_pubkey ON events(pubkey);
     CREATE INDEX IF NOT EXISTS idx_kind ON events(kind);
     CREATE INDEX IF NOT EXISTS idx_created_at ON events(created_at);
     CREATE INDEX IF NOT EXISTS idx_kind_pubkey ON events(kind, pubkey);
     CREATE INDEX IF NOT EXISTS idx_kind_pubkey_created ON events(kind, pubkey, created_at);
+    CREATE INDEX IF NOT EXISTS idx_seq ON events(seq);
   `);
 
   // Create tag index table for single-letter tags
@@ -83,7 +86,7 @@ function parseRevisionId(revId: string): { generation: number; hash: string } {
 // Store an event in the database
 export function storeEvent(
   event: NostrEvent
-): { success: boolean; message: string } {
+): { success: boolean; message: string; seq?: number } {
   const database = getDatabase();
 
   // Don't store ephemeral events
@@ -93,7 +96,7 @@ export function storeEvent(
 
   // Check for duplicate
   const existing = database
-    .query("SELECT id FROM events WHERE id = ?")
+    .query("SELECT seq FROM events WHERE id = ?")
     .get(event.id);
   if (existing) {
     return { success: true, message: "duplicate: already have this event" };
@@ -178,18 +181,23 @@ export function storeEvent(
         event.sig
       );
 
+    // Get the assigned sequence number
+    const seq = database.query("SELECT last_insert_rowid() as seq").get() as { seq: number };
+
     // Index single-letter tags
     for (const tag of event.tags) {
-      if (tag.length >= 2 && tag[0].length === 1 && /^[a-zA-Z]$/.test(tag[0])) {
+      const tagName = tag[0];
+      const tagValue = tag[1];
+      if (tag.length >= 2 && tagName && tagName.length === 1 && /^[a-zA-Z]$/.test(tagName) && tagValue !== undefined) {
         database
           .query(
             `INSERT INTO event_tags (event_id, tag_name, tag_value) VALUES (?, ?, ?)`
           )
-          .run(event.id, tag[0], tag[1]);
+          .run(event.id, tagName, tagValue);
       }
     }
 
-    return { success: true, message: "" };
+    return { success: true, message: "", seq: seq.seq };
   } catch (error) {
     return {
       success: false,
@@ -350,4 +358,122 @@ export function getEvent(id: string): NostrEvent | null {
     content: row.content,
     sig: row.sig,
   };
+}
+
+// Changes feed types
+export interface ChangeEntry {
+  seq: number;
+  event: NostrEvent;
+}
+
+export interface ChangesResult {
+  changes: ChangeEntry[];
+  lastSeq: number;
+}
+
+// Get the current max sequence number
+export function getLastSeq(): number {
+  const database = getDatabase();
+  const result = database.query("SELECT MAX(seq) as maxSeq FROM events").get() as { maxSeq: number | null };
+  return result.maxSeq ?? 0;
+}
+
+// Query changes since a sequence number (like CouchDB _changes)
+export function queryChanges(
+  sinceSeq: number,
+  options: {
+    limit?: number;
+    kinds?: number[];
+    authors?: string[];
+  } = {}
+): ChangesResult {
+  const database = getDatabase();
+  const conditions: string[] = ["seq > ?"];
+  const params: (string | number)[] = [sinceSeq];
+
+  if (options.kinds && options.kinds.length > 0) {
+    conditions.push(`kind IN (${options.kinds.map(() => "?").join(", ")})`);
+    params.push(...options.kinds);
+  }
+
+  if (options.authors && options.authors.length > 0) {
+    conditions.push(`pubkey IN (${options.authors.map(() => "?").join(", ")})`);
+    params.push(...options.authors);
+  }
+
+  const whereClause = conditions.join(" AND ");
+  const limitClause = options.limit ? `LIMIT ${options.limit}` : "";
+
+  const query = `
+    SELECT seq, id, pubkey, created_at, kind, tags, content, sig
+    FROM events
+    WHERE ${whereClause}
+    ORDER BY seq ASC
+    ${limitClause}
+  `;
+
+  const rows = database.query(query).all(...params) as Array<{
+    seq: number;
+    id: string;
+    pubkey: string;
+    created_at: number;
+    kind: number;
+    tags: string;
+    content: string;
+    sig: string;
+  }>;
+
+  const changes: ChangeEntry[] = rows.map((row) => ({
+    seq: row.seq,
+    event: {
+      id: row.id,
+      pubkey: row.pubkey,
+      created_at: row.created_at,
+      kind: row.kind,
+      tags: JSON.parse(row.tags),
+      content: row.content,
+      sig: row.sig,
+    },
+  }));
+
+  // Always return the global lastSeq so clients can advance their checkpoint
+  // even when there are no matching changes for their filter
+  const globalLastSeq = getLastSeq();
+  const lastChange = changes[changes.length - 1];
+
+  // Return the higher of: last matching change seq, or global seq if no matches
+  // This ensures clients don't re-query the same range repeatedly
+  const lastSeq = lastChange ? lastChange.seq : globalLastSeq;
+
+  return { changes, lastSeq };
+}
+
+// Purge a document - delete all events for a document (pubkey + kind + d-tag)
+export function purgeDocument(
+  pubkey: string,
+  kind: number,
+  docId: string
+): { success: boolean; deletedCount: number } {
+  const database = getDatabase();
+
+  try {
+    // Find all events matching pubkey + kind + d-tag
+    const events = database
+      .query(
+        `SELECT e.id FROM events e
+         JOIN event_tags t ON e.id = t.event_id
+         WHERE e.pubkey = ? AND e.kind = ? AND t.tag_name = 'd' AND t.tag_value = ?`
+      )
+      .all(pubkey, kind, docId) as Array<{ id: string }>;
+
+    // Delete each event and its tags
+    for (const event of events) {
+      deleteEvent(event.id);
+    }
+
+    return { success: true, deletedCount: events.length };
+  } catch (error) {
+    console.error("Error purging document:", error);
+    return { success: false, deletedCount: 0 };
+  }
 }
